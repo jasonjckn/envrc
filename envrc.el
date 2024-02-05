@@ -6,7 +6,7 @@
 ;; Keywords: processes, tools
 ;; Homepage: https://github.com/purcell/envrc
 ;; Package-Requires: ((seq "2") (emacs "25.1") (inheritenv "0.1"))
-;; Package-Version: 0
+;; Package-Version: 0.6
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -74,7 +74,10 @@
 Messages are written into the *envrc-debug* buffer."
   :type 'boolean)
 
-;; FIXME in some context this seems to void... Currently unused
+(defcustom envrc-update-on-eshell-directory-change t
+  "Whether envrc will update environment when changing directory in eshell."
+  :type 'boolean)
+
 (defcustom envrc-direnv-executable "direnv"
   "The direnv executable used by envrc."
   :type 'string)
@@ -104,6 +107,7 @@ You can set this to nil to disable the lighter."
     (define-key map (kbd "a") 'envrc-allow)
     (define-key map (kbd "d") 'envrc-deny)
     (define-key map (kbd "r") 'envrc-reload)
+    (define-key map (kbd "l") 'envrc-show-log)
     map)
   "Keymap for commands in `envrc-mode'.
 See `envrc-mode-map' for how to assign a prefix binding to these."
@@ -123,8 +127,12 @@ e.g. (define-key envrc-mode-map (kbd \"C-c e\") 'envrc-command-map)"
   :lighter envrc-lighter
   :keymap envrc-mode-map
   (if envrc-mode
-      (envrc--update)
-    (envrc--clear (current-buffer))))
+      (progn
+        (envrc--update)
+        (when (and (derived-mode-p 'eshell-mode) envrc-update-on-eshell-directory-change)
+          (add-hook 'eshell-directory-change-hook #'envrc--update nil t)))
+    (envrc--clear (current-buffer))
+    (remove-hook 'eshell-directory-change-hook #'envrc--update t)))
 
 ;;;###autoload
 (define-globalized-minor-mode envrc-global-mode envrc-mode
@@ -255,8 +263,6 @@ variable names and values."
           (message "%s" stderr)))
       (funcall callback result))))
 
-
-
 ;; Forward declaration for the byte compiler
 (defvar eshell-path-env)
 
@@ -279,6 +285,7 @@ also appear in PAIRS."
   (with-current-buffer buf
     (kill-local-variable 'exec-path)
     (kill-local-variable 'process-environment)
+    (kill-local-variable 'info-directory-list)
     (when (derived-mode-p 'eshell-mode)
       (if (fboundp 'eshell-set-path)
           (eshell-set-path (butlast exec-path))
@@ -300,7 +307,9 @@ also appear in PAIRS."
         (when (derived-mode-p 'eshell-mode)
           (if (fboundp 'eshell-set-path)
               (eshell-set-path path)
-            (setq-local eshell-path-env path)))))))
+            (setq-local eshell-path-env path))))
+      (when-let ((info-path (getenv "INFOPATH")))
+        (setq-local Info-directory-list (parse-colon-path info-path))))))
 
 (defun envrc--update-env (env-dir)
   "Refresh the state of the direnv in ENV-DIR and apply in all relevant buffers."
@@ -359,7 +368,12 @@ the exit code, stdout and stderr of the process."
   "Reload the current env."
   (interactive)
   (envrc--with-required-current-env env-dir
-    (envrc--update-env env-dir)))
+    (let* ((default-directory env-dir)
+           (exit-code (envrc--call-process-with-global-env envrc-direnv-executable nil (get-buffer-create "*envrc-reload*") nil "reload")))
+      (if (zerop exit-code)
+          (envrc--update-env env-dir)
+        (display-buffer "*envrc-reload*")
+        (user-error "Error running direnv reload")))))
 
 (defun envrc-allow ()
   "Run \"direnv allow\" in the current env."
@@ -403,6 +417,12 @@ This can be useful if a .envrc has been deleted."
     (with-current-buffer buf
       (envrc--update))))
 
+(defun envrc-show-log ()
+  "Open envrc log buffer."
+  (interactive)
+  (if-let ((buffer (get-buffer "*envrc*")))
+      (pop-to-buffer buffer)
+    (message "Envrc log buffer does not exist")))
 
 
 ;;; Propagate local environment to commands that use temp buffers
@@ -432,11 +452,14 @@ in a temp buffer.  ARGS is as for ORIG."
     "use" "use_guix" "use_flake" "use_nix" "user_rel_path" "watch_dir" "watch_file")
   "Useful direnv keywords to be highlighted.")
 
+(declare-function sh-set-shell "sh-script")
+
 ;;;###autoload
 (define-derived-mode envrc-file-mode
   sh-mode "envrc"
   "Major mode for .envrc files as used by direnv.
 \\{envrc-file-mode-map}"
+  (sh-set-shell "bash")
   (font-lock-add-keywords
    nil `((,(regexp-opt envrc-file-extra-keywords 'symbols)
           (0 font-lock-keyword-face)))))
@@ -451,5 +474,6 @@ in a temp buffer.  ARGS is as for ORIG."
 ;; LocalWords:  envrc direnv
 
 ;; Local Variables:
+;; coding: utf-8
 ;; indent-tabs-mode: nil
 ;; End:
